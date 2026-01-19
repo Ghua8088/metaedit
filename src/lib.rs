@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::collections::HashMap;
 use std::fs;
 
@@ -16,7 +16,7 @@ pub struct MetadataEditor {
 }
 
 #[cfg(target_os = "windows")]
-use editpe::Image;
+use editpe::{Image, ResourceDirectory, VersionInfo, VersionStringTable};
 
 #[pymethods]
 impl MetadataEditor {
@@ -78,33 +78,57 @@ impl MetadataEditor {
         let data = fs::read(&self.file_path)?;
         let mut image = Image::parse(&data).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("PE Parse error: {:?}", e)))?;
         
+        let mut resources = image.resource_directory().cloned().unwrap_or_default();
+        
         println!("Rust (Windows): Patching PE Resources in {}", self.file_path);
         
         // 1. Set Icon
         if let Some(icon_path) = &self.icon_path {
             let icon_data = fs::read(icon_path)?;
-            image.set_icon(&icon_data).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set icon: {:?}", e)))?;
+            resources.set_main_icon(icon_data).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set icon: {:?}", e)))?;
         }
 
         // 2. Set Version Strings
         if !self.strings.is_empty() || self.version.is_some() {
-            let mut version_info = image.get_version_info().unwrap_or_default();
+            let mut version_info = resources.get_version_info().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to get version info: {:?}", e)))?.unwrap_or_default();
             
             if let Some(v) = &self.version {
-                version_info.file_version = v.clone();
-                version_info.product_version = v.clone();
+                // FixedFileInfo version is numeric (Major.Minor)
+                // We'll attempt to parse if possible, or leave as default for now as editpe uses VersionU32
+                // Most users care about the string entries which we handle below
             }
             
-            for (k, v) in &self.strings {
-                version_info.strings.insert(k.clone(), v.clone());
+            if let Some(table) = version_info.strings.get_mut(0) {
+                if let Some(v) = &self.version {
+                    table.strings.insert("FileVersion".to_string(), v.clone());
+                    table.strings.insert("ProductVersion".to_string(), v.clone());
+                }
+                for (k, v) in &self.strings {
+                    table.strings.insert(k.clone(), v.clone());
+                }
+            } else {
+                // If no table exists, create one (040904b0 is US English)
+                let mut strings = indexmap::IndexMap::default();
+                if let Some(v) = &self.version {
+                    strings.insert("FileVersion".to_string(), v.clone());
+                    strings.insert("ProductVersion".to_string(), v.clone());
+                }
+                for (k, v) in &self.strings {
+                    strings.insert(k.clone(), v.clone());
+                }
+                version_info.strings.push(VersionStringTable {
+                    key: "040904b0".to_string(),
+                    strings,
+                });
             }
             
-            image.set_version_info(&version_info).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set version info: {:?}", e)))?;
+            resources.set_version_info(&version_info).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set version info: {:?}", e)))?;
         }
 
-        // 3. Write back
-        let new_data = image.build().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to build PE: {:?}", e)))?;
-        fs::write(&self.file_path, new_data)?;
+        // 3. Re-insert and Write back
+        image.set_resource_directory(resources).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set resources: {:?}", e)))?;
+        let final_data = image.data();
+        fs::write(&self.file_path, final_data)?;
 
         Ok(())
     }
@@ -191,9 +215,9 @@ fn edit(file_path: String, metadata: Option<HashMap<String, String>>) -> Metadat
     if let Some(meta) = metadata {
         for (k, v) in meta {
             match k.as_str() {
-                "icon" => { editor.set_icon(v); },
-                "version" => { editor.set_version(v); },
-                _ => { editor.set_string(k, v); }
+                "icon" => { editor.icon_path = Some(v); },
+                "version" => { editor.version = Some(v); },
+                _ => { editor.strings.insert(k, v); }
             }
         }
     }
@@ -207,9 +231,9 @@ fn update(file_path: String, kwargs: Option<HashMap<String, String>>) -> PyResul
     if let Some(args) = kwargs {
         for (k, v) in args {
             match k.as_str() {
-                "icon" => { editor.set_icon(v); },
-                "version" => { editor.set_version(v); },
-                _ => { editor.set_string(k, v); }
+                "icon" => { editor.icon_path = Some(v); },
+                "version" => { editor.version = Some(v); },
+                _ => { editor.strings.insert(k, v); }
             }
         }
     }
