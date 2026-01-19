@@ -25,8 +25,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pytron-org/pytron-suite"
-Repository = "https://github.com/pytron-org/pytron-suite"
+Homepage = "https://github.com/Ghua8088/metaedit"
+Repository = "https://github.com/Ghua8088/metaedit"
+
+[project.scripts]
+metaedit = "metaedit.cli:main"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
