@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "metaedit"
+version = "0.1.0"
+description = "Fast and easy PE metadata editor"
+requires-python = ">=3.8"
+dependencies = [
+    "click",
+]
+
+[project.scripts]
+metaedit = "metaedit.cli:main"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "metaedit._metaedit"

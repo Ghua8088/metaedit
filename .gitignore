@@ -1,0 +1,22 @@
+# Rust
+/target
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+build/
+dist/
+*.egg-info/
+metaedit/*.pyd
+metaedit/*.so
+metaedit/*.dylib
+
+# IDEs
+.vscode/
+.idea/
+
+# Tests
+.pytest_cache/

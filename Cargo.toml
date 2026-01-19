@@ -1,0 +1,21 @@
+[package]
+name = "metaedit"
+version = "0.1.0"
+edition = "2021"
+description = "Fast and easy PE metadata editor"
+
+[lib]
+name = "_metaedit"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+anyhow = "1.0"
+cfg-if = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+editpe = "0.2"
+pelite = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1.6"
