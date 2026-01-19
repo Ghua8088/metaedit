@@ -5,14 +5,28 @@ build-backend = "maturin"
 [project]
 name = "metaedit"
 version = "0.1.0"
-description = "Fast and easy PE metadata editor"
+description = "Surgical Binary Metadata Editing. Powered by Rust."
+readme = "README.md"
+authors = [{ name = "Ghua8088", email = "ghua8088.contact@gmail.com" }]
+license = { text = "MIT" }
 requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+]
+keywords = ["binary", "metadata", "pe", "windows", "rcedit", "icon", "version"]
+
 dependencies = [
     "click",
 ]
 
-[project.scripts]
-metaedit = "metaedit.cli:main"
+[project.urls]
+Homepage = "https://github.com/pytron-org/pytron-suite"
+Repository = "https://github.com/pytron-org/pytron-suite"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

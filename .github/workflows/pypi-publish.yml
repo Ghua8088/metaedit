@@ -10,6 +10,9 @@ jobs:
   build-and-publish:
     name: Build & Publish
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/metaedit
     permissions:
       contents: write
       id-token: write
@@ -37,5 +40,3 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
