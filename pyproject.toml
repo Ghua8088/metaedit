@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "metaedit"
-version = "0.1.2"
+version = "0.1.21"
 description = "Surgical Binary Metadata Editing. Powered by Rust."
 readme = "README.md"
 authors = [{ name = "Ghua8088", email = "ghua8088.contact@gmail.com" }]
