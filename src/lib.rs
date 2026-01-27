@@ -2,9 +2,16 @@ use pyo3::prelude::*;
 use std::path::Path;
 use std::collections::HashMap;
 use std::fs;
+use pyo3::create_exception;
 
 #[cfg(target_os = "macos")]
 use plist::Value;
+
+// Define custom exceptions
+create_exception!(_metaedit, MetaEditError, pyo3::exceptions::PyException);
+create_exception!(_metaedit, PEParseError, MetaEditError);
+create_exception!(_metaedit, IconError, MetaEditError);
+// create_exception!(_metaedit, SigningError, MetaEditError);
 
 #[pyclass]
 #[derive(Clone)]
@@ -51,6 +58,22 @@ impl MetadataEditor {
         sli
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn remove_signature(&self) -> PyResult<()> {
+        let path = Path::new(&self.file_path);
+        if !path.exists() {
+            return Err(PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(
+                format!("File not found: {}", self.file_path),
+            ));
+        }
+
+        let mut data = fs::read(path)?;
+        if strip_pe_signature(&mut data) {
+            fs::write(path, data)?;
+        }
+        Ok(())
+    }
+
     pub fn apply(&self) -> PyResult<()> {
         let path = Path::new(&self.file_path);
         if !path.exists() {
@@ -87,18 +110,29 @@ impl MetadataEditor {
         if let Ok(reader) = ImageReader::open(path) {
             if let Ok(img) = reader.decode() {
                 // Generate multi-size ICO
-                // Standard sizes: 256, 128, 64, 48, 32, 16, 8
-                let sizes = vec![256, 128, 64, 48, 32, 16, 8];
+                // Windows prefers 256x256 PNG, others using BMP format for crispness at low res.
+                // Standard sizes: 256, 128, 64, 48, 32, 24, 16.
+                let sizes = vec![256, 128, 64, 48, 32, 24, 16];
                 let mut frames = Vec::new();
                 
                 for size in sizes {
                     let resized = img.resize(size, size, FilterType::Lanczos3);
                     let width = resized.width();
                     let height = resized.height();
-                    let buf = resized.into_rgba8().into_vec();
                     
-                    if let Ok(frame) = IcoFrame::as_png(&buf, width, height, ExtendedColorType::Rgba8) {
-                        frames.push(frame);
+                    if size >= 128 {
+                        // Use PNG for large icons (Vista+ support)
+                        let buf = resized.clone().into_rgba8().into_vec();
+                        if let Ok(frame) = IcoFrame::as_png(&buf, width, height, ExtendedColorType::Rgba8) {
+                            frames.push(frame);
+                        }
+                    } else {
+                        // Use manually constructed BMP for smaller icons to avoid artifacting
+                        if let Ok(bmp_data) = create_ico_bmp_data(&resized, width, height) {
+                             if let Ok(frame) = IcoFrame::with_encoded(bmp_data, width, height, ExtendedColorType::Rgba8) {
+                                frames.push(frame);
+                            }
+                        }
                     }
                 }
                 
@@ -114,13 +148,13 @@ impl MetadataEditor {
         }
 
         // Fallback: read file directly
-        fs::read(path).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to read icon file: {:?}", e)))
+        fs::read(path).map_err(|e| PyErr::new::<IconError, _>(format!("Failed to read icon file: {:?}", e)))
     }
 
     #[cfg(target_os = "windows")]
     fn apply_windows(&self) -> PyResult<()> {
         let data = fs::read(&self.file_path)?;
-        let mut image = Image::parse(&data).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("PE Parse error: {:?}", e)))?;
+        let mut image = Image::parse(&data).map_err(|e| PyErr::new::<PEParseError, _>(format!("PE Parse error: {:?}", e)))?;
         
         let mut resources = image.resource_directory().cloned().unwrap_or_default();
         
@@ -129,12 +163,12 @@ impl MetadataEditor {
         // 1. Set Icon
         if let Some(icon_path) = &self.icon_path {
             let icon_data = self.process_icon_windows(icon_path)?;
-            resources.set_main_icon(icon_data).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set icon: {:?}", e)))?;
+            resources.set_main_icon(icon_data).map_err(|e| PyErr::new::<PEParseError, _>(format!("Failed to set icon: {:?}", e)))?;
         }
 
         // 2. Set Version Strings
         if !self.strings.is_empty() || self.version.is_some() {
-            let mut version_info = resources.get_version_info().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to get version info: {:?}", e)))?.unwrap_or_default();
+            let mut version_info = resources.get_version_info().map_err(|e| PyErr::new::<PEParseError, _>(format!("Failed to get version info: {:?}", e)))?.unwrap_or_default();
             
             if let Some(v) = &self.version {
                 // FixedFileInfo version is numeric (Major.Minor)
@@ -166,12 +200,16 @@ impl MetadataEditor {
                 });
             }
             
-            resources.set_version_info(&version_info).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set version info: {:?}", e)))?;
+            resources.set_version_info(&version_info).map_err(|e| PyErr::new::<PEParseError, _>(format!("Failed to set version info: {:?}", e)))?;
         }
 
         // 3. Re-insert and Write back
-        image.set_resource_directory(resources).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set resources: {:?}", e)))?;
-        let final_data = image.data();
+        image.set_resource_directory(resources).map_err(|e| PyErr::new::<PEParseError, _>(format!("Failed to set resources: {:?}", e)))?;
+        let mut final_data = image.data().to_vec();
+        
+        // Strip signature to prevent corruption errors (hash mismatch)
+        strip_pe_signature(&mut final_data);
+
         fs::write(&self.file_path, final_data)?;
 
         Ok(())
@@ -285,9 +323,127 @@ fn update(file_path: String, kwargs: Option<HashMap<String, String>>) -> PyResul
 }
 
 #[pymodule]
-fn _metaedit(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _metaedit(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MetadataEditor>()?;
     m.add_function(wrap_pyfunction!(edit, m)?)?;
     m.add_function(wrap_pyfunction!(update, m)?)?;
+    
+    m.add("MetaEditError", py.get_type::<MetaEditError>())?;
+    m.add("PEParseError", py.get_type::<PEParseError>())?;
+    m.add("IconError", py.get_type::<IconError>())?;
+    // m.add("SigningError", py.get_type::<SigningError>())?;
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn create_ico_bmp_data(img: &image::DynamicImage, width: u32, height: u32) -> PyResult<Vec<u8>> {
+    let rgba = img.to_rgba8();
+    
+    // Each row in the AND mask must be a multiple of 4 bytes (32 bits)
+    // Formula: ((width + 31) / 32) * 4
+    let mask_row_size = ((width + 31) / 32) * 4;
+    let mask_size = mask_row_size * height;
+    
+    // Header (40) + XOR data (w*h*4) + AND mask
+    let data_size = 40 + (width * height * 4) + mask_size;
+    let mut data = Vec::with_capacity(data_size as usize);
+
+    // BITMAPINFOHEADER (40 bytes)
+    data.extend_from_slice(&(40u32).to_le_bytes()); // biSize
+    data.extend_from_slice(&(width as i32).to_le_bytes()); // biWidth
+    // ICO BMPs often use (height * 2) in the header to indicate XOR+AND combination
+    data.extend_from_slice(&((height * 2) as i32).to_le_bytes()); // biHeight
+    data.extend_from_slice(&(1u16).to_le_bytes()); // biPlanes
+    data.extend_from_slice(&(32u16).to_le_bytes()); // biBitCount (BGRA)
+    data.extend_from_slice(&(0u32).to_le_bytes()); // biCompression (BI_RGB)
+    data.extend_from_slice(&(0u32).to_le_bytes()); // biSizeImage (can be 0 for BI_RGB)
+    data.extend_from_slice(&(0u32).to_le_bytes()); // biXPelsPerMeter
+    data.extend_from_slice(&(0u32).to_le_bytes()); // biYPelsPerMeter
+    data.extend_from_slice(&(0u32).to_le_bytes()); // biClrUsed
+    data.extend_from_slice(&(0u32).to_le_bytes()); // biClrImportant
+
+    // XOR Mask (Pixel Data) - Stored Bottom-Up, BGRA format
+    for y in (0..height).rev() {
+        for x in 0..width {
+            let pixel = rgba.get_pixel(x, y);
+            data.push(pixel[2]); // B
+            data.push(pixel[1]); // G
+            data.push(pixel[0]); // R
+            data.push(pixel[3]); // A
+        }
+    }
+
+    // AND Mask (1-bit transparency) - Stored Bottom-Up
+    // 0 = Opaque, 1 = Transparent.
+    // Since we used Alpha channel in XOR mask (32-bit), this is technically redundant on modern Windows,
+    // but absolutely required for legacy compatibility and valid BMP structure in ICO.
+    for y in (0..height).rev() {
+        let mut row_bytes = vec![0u8; mask_row_size as usize];
+        for x in 0..width {
+            let pixel = rgba.get_pixel(x, y);
+            // If alpha is 0, we mark it as transparent (1) in the AND mask.
+            // Otherwise opaque (0).
+            if pixel[3] == 0 {
+                let byte_idx = (x / 8) as usize;
+                let bit_idx = 7 - (x % 8);
+                row_bytes[byte_idx] |= 1 << bit_idx;
+            }
+        }
+        data.extend_from_slice(&row_bytes);
+    }
+    
+    Ok(data)
+}
+
+#[cfg(target_os = "windows")]
+fn strip_pe_signature(data: &mut Vec<u8>) -> bool {
+    // Minimum size for DOS header + PE Sig + File Header
+    if data.len() < 0x40 { return false; }
+    
+    // Read e_lfanew (offset to PE header)
+    let e_lfanew = u32::from_le_bytes(data[0x3c..0x40].try_into().unwrap()) as usize;
+    if data.len() < e_lfanew + 4 + 20 + 2 { return false; }
+    
+    // Validate PE signature "PE\0\0"
+    if &data[e_lfanew..e_lfanew+4] != b"PE\0\0" { return false; }
+    
+    // Optional Header Magic is at e_lfanew + 4 (Sig) + 20 (FileHeader)
+    let opt_header_offset = e_lfanew + 24;
+    let magic = u16::from_le_bytes(data[opt_header_offset..opt_header_offset+2].try_into().unwrap());
+    
+    // Locate Security Directory Entry (Index 4 in Data Directories)
+    // PE32 (0x10b): Data Dirs start at offset 96 (0x60) in Optional Header
+    // PE32+ (0x20b): Data Dirs start at offset 112 (0x70) in Optional Header
+    // Security entry is 4th (index 4), so + 4 * 8 bytes
+    let rva_offset = match magic {
+        0x10b => opt_header_offset + 96 + 32,
+        0x20b => opt_header_offset + 112 + 32,
+        _ => return false,
+    };
+    
+    if data.len() < rva_offset + 8 { return false; }
+    
+    let virt_addr = u32::from_le_bytes(data[rva_offset..rva_offset+4].try_into().unwrap());
+    let size = u32::from_le_bytes(data[rva_offset+4..rva_offset+8].try_into().unwrap());
+    
+    if virt_addr == 0 || size == 0 {
+        return false; // No signature present
+    }
+    
+    // Zero out the Security Directory entry
+    data[rva_offset..rva_offset+8].fill(0);
+    
+    // Truncate the file if the certificate table is at the very end
+    let start = virt_addr as usize;
+    let end = start + size as usize;
+    
+    // Safety check: ensure start is within bounds
+    if start <= data.len() && end <= data.len() {
+        // If the table ends exactly at the file end, we can safely truncate
+        if end == data.len() {
+            data.truncate(start);
+        }
+    }
+    
+    true
 }
