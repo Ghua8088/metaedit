@@ -16,7 +16,13 @@ pub struct MetadataEditor {
 }
 
 #[cfg(target_os = "windows")]
-use editpe::{Image, ResourceDirectory, VersionInfo, VersionStringTable};
+use editpe::{Image, VersionStringTable};
+#[cfg(target_os = "windows")]
+use image::{ImageReader, imageops::FilterType, ExtendedColorType};
+#[cfg(target_os = "windows")]
+use image::codecs::ico::{IcoEncoder, IcoFrame};
+#[cfg(target_os = "windows")]
+use std::io::Cursor;
 
 #[pymethods]
 impl MetadataEditor {
@@ -74,6 +80,44 @@ impl MetadataEditor {
 
 impl MetadataEditor {
     #[cfg(target_os = "windows")]
+    fn process_icon_windows(&self, icon_path: &str) -> PyResult<Vec<u8>> {
+        let path = Path::new(icon_path);
+
+        // Try decoding as image to see if we can generate a better ICO
+        if let Ok(reader) = ImageReader::open(path) {
+            if let Ok(img) = reader.decode() {
+                // Generate multi-size ICO
+                // Standard sizes: 256, 128, 64, 48, 32, 16, 8
+                let sizes = vec![256, 128, 64, 48, 32, 16, 8];
+                let mut frames = Vec::new();
+                
+                for size in sizes {
+                    let resized = img.resize(size, size, FilterType::Lanczos3);
+                    let width = resized.width();
+                    let height = resized.height();
+                    let buf = resized.into_rgba8().into_vec();
+                    
+                    if let Ok(frame) = IcoFrame::as_png(&buf, width, height, ExtendedColorType::Rgba8) {
+                        frames.push(frame);
+                    }
+                }
+                
+                if !frames.is_empty() {
+                    let mut out_buffer = Vec::new();
+                    let mut cursor = Cursor::new(&mut out_buffer);
+                    let encoder = IcoEncoder::new(&mut cursor);
+                    if encoder.encode_images(&frames).is_ok() {
+                        return Ok(out_buffer);
+                    }
+                }
+            }
+        }
+
+        // Fallback: read file directly
+        fs::read(path).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to read icon file: {:?}", e)))
+    }
+
+    #[cfg(target_os = "windows")]
     fn apply_windows(&self) -> PyResult<()> {
         let data = fs::read(&self.file_path)?;
         let mut image = Image::parse(&data).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("PE Parse error: {:?}", e)))?;
@@ -84,7 +128,7 @@ impl MetadataEditor {
         
         // 1. Set Icon
         if let Some(icon_path) = &self.icon_path {
-            let icon_data = fs::read(icon_path)?;
+            let icon_data = self.process_icon_windows(icon_path)?;
             resources.set_main_icon(icon_data).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set icon: {:?}", e)))?;
         }
 
