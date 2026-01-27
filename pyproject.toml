@@ -24,6 +24,13 @@ dependencies = [
     "click",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pefile",
+    "Pillow",
+]
+
 [project.urls]
 Homepage = "https://github.com/Ghua8088/metaedit"
 Repository = "https://github.com/Ghua8088/metaedit"

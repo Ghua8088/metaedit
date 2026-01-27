@@ -418,14 +418,16 @@ fn strip_pe_signature(data: &mut Vec<u8>) -> bool {
     let rva_offset = match magic {
         0x10b => opt_header_offset + 96 + 32,
         0x20b => opt_header_offset + 112 + 32,
-        _ => return false,
+        _ => { println!("DEBUG: Unknown magic: {:x}, opt_header_offset: {}", magic, opt_header_offset); return false; },
     };
     
-    if data.len() < rva_offset + 8 { return false; }
+    if data.len() < rva_offset + 8 { println!("DEBUG: File too short for rva"); return false; }
     
     let virt_addr = u32::from_le_bytes(data[rva_offset..rva_offset+4].try_into().unwrap());
     let size = u32::from_le_bytes(data[rva_offset+4..rva_offset+8].try_into().unwrap());
     
+    println!("DEBUG: Found Security Dir at offset {}: VA={:x}, Size={}", rva_offset, virt_addr, size);
+
     if virt_addr == 0 || size == 0 {
         return false; // No signature present
     }
